@@ -1,0 +1,1290 @@
+---
+title: "$\\text{CO}_2$ Atmosférico em Mauna Loa"
+subtitle: "Trabalho 1 --- Análise de Séries Temporais"
+author:
+  - "Arthur Motta"
+  - "Catarine Martins"
+date: "today"
+lang: pt
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    toc-title: "Sumário"
+    code-fold: true
+    code-tools: true
+    theme: flatly
+    highlight-style: github
+    fig-width: 9
+    fig-height: 5.5
+    number-sections: true
+    embed-resources: true
+execute:
+  warning: false
+  message: false
+  echo: true
+bibliography: references.bib
+crossref:
+  sec-prefix: "Seção"
+---
+
+```{r setup}
+#| label: setup
+#| code-summary: "Carregar pacotes"
+
+# --- Séries temporais e modelagem ---
+library(forecast)    # auto.arima, Arima, forecast, ACF/PACF via ggplot
+library(tseries)     # adf.test, kpss.test: testes de raiz unitária
+library(TSA)         # eacf (ESACF para identificação de ordens)
+
+# --- Visualização ---
+library(ggplot2)     # base gráfica
+library(patchwork)   # composição de painéis
+library(scales)      # formatação de eixos
+library(ggfortify)   # autoplot para objetos ts e decompose
+
+# --- Tabelas ---
+library(gt)          # tabelas com formatação avançada
+library(broom)       # tidy() para extrair coeficientes de modelos
+
+# --- Manipulação ---
+library(tidyverse)   # dplyr, tidyr, stringr, purrr
+
+theme_set(theme_minimal(base_size = 12))
+
+# Paleta de cores consistente
+cores <- c("#2E86AB", "#E94F37", "#3BB273", "#F4A261", "#8338EC")
+
+# Função auxiliar: ACF/PACF → data.frame com lag em meses (inteiro)
+acf_df <- function(x, lag.max, type = "correlation") {
+  obj <- acf(x, lag.max = lag.max, type = type, plot = FALSE)
+  tibble(
+    lag = as.integer(round(obj$lag * frequency(x))),  # converte anos → meses
+    acf = as.numeric(obj$acf)
+  ) |>
+    filter(lag > 0 | type == "correlation")           # remove lag-0 da PACF
+}
+
+pacf_df <- function(x, lag.max) {
+  obj <- pacf(x, lag.max = lag.max, plot = FALSE)
+  tibble(
+    lag = as.integer(round(obj$lag * frequency(x))),
+    acf = as.numeric(obj$acf)
+  )
+}
+
+plot_acf <- function(df, ic, title, ylab = "ACF",
+                     vlines = NULL, vlab = NULL) {
+  p <- ggplot(df, aes(x = lag, y = acf)) +
+    geom_hline(yintercept = 0, color = "gray50") +
+    geom_segment(aes(xend = lag, yend = 0), color = cores[1], linewidth = 0.7) +
+    geom_hline(yintercept = c(-ic, ic),
+               linetype = "dashed", color = cores[2], linewidth = 0.7) +
+    labs(title = title, x = "Defasagem (meses)", y = ylab) +
+    scale_x_continuous(breaks = seq(0, max(df$lag), by = 6))
+  if (!is.null(vlines)) {
+    p <- p +
+      geom_vline(xintercept = vlines,
+                 linetype = "dotted", color = cores[4], linewidth = 0.5)
+    if (!is.null(vlab))
+      p <- p + annotate("text", x = vlines, y = max(df$acf) * 0.9,
+                        label = paste0("lag ", vlines),
+                        size = 2.8, color = cores[4])
+  }
+  p
+}
+```
+
+# Introdução
+
+O dióxido de carbono ($\text{CO}_2$) é o principal gás de efeito estufa de origem
+antrópica, responsável por aproximadamente dois terços do aquecimento global
+antropogênico. Sua concentração na atmosfera é monitorada continuamente desde março
+de 1958 pelo **Observatório de Mauna Loa**, localizado a 3.397 metros de altitude
+no vulcão Mauna Loa, na ilha de Havaí. A escolha desse local não foi acidental: a
+altitude elevada, o isolamento geográfico no meio do Oceano Pacífico e a distância
+de fontes locais significativas de poluição garantem medições representativas da
+concentração global de $\text{CO}_2$ na atmosfera, minimizando influências urbanas,
+industriais ou de variações locais da vegetação.
+
+As medições iniciadas pelo cientista **Charles David Keeling** geraram a série
+histórica mais longa, precisa e cientificamente importante de $\text{CO}_2$
+atmosférico disponível — conhecida mundialmente como **Curva de Keeling**
+[@keeling1976atmospheric]. Esta série documenta de forma inequívoca o aumento
+contínuo das concentrações de $\text{CO}_2$ desde o início das medições sistemáticas
+e constitui evidência fundamental nas discussões sobre mudanças climáticas globais.
+
+Este trabalho analisa a série `co2` disponível nativamente no R, que contém as
+concentrações médias mensais de $\text{CO}_2$ (em partes por milhão, ppm) de
+**janeiro de 1959 a dezembro de 1997** — 468 observações mensais. A série é
+amplamente estudada na literatura de séries temporais por reunir, em um único
+conjunto de dados, dois fenômenos de grande interesse estatístico e científico:
+
+1. **Tendência crescente de longo prazo:** reflexo do acúmulo antropogênico de
+   $\text{CO}_2$ proveniente principalmente da queima de combustíveis fósseis
+   (petróleo, carvão, gás natural) e, em menor escala, de mudanças no uso da terra
+   e desmatamento.
+
+2. **Sazonalidade anual regular:** reflexo do ciclo sazonal de fotossíntese e
+   respiração vegetal, predominantemente do hemisfério norte, onde se concentra a
+   maior parte da massa terrestre vegetada do planeta. No inverno boreal (outubro a
+   maio), a respiração das plantas supera a fotossíntese, liberando $\text{CO}_2$ na
+   atmosfera; no verão boreal (maio a setembro), a fotossíntese intensificada absorve
+   $\text{CO}_2$, reduzindo sua concentração atmosférica.
+
+Essa combinação de tendência não estacionária e sazonalidade estocástica
+a torna um **caso de referência clássico** para a
+metodologia SARIMA (Seasonal Autoregressive Integrated Moving Average).
+
+**Pergunta de interesse:** É possível ajustar um modelo SARIMA parcimonioso que
+capture simultaneamente a tendência e a sazonalidade da série e produza previsões
+confiáveis para horizontes de até dois anos?
+
+A análise segue rigorosamente a metodologia de @brockwell2010introduction e
+@morettin2004series, e está organizada em quatro etapas: (1) **análise descritiva**
+— caracterização da tendência, sazonalidade e componentes da série via decomposição
+STL; (2) **identificação e ajuste** — seleção de modelos SARIMA candidatos por
+critérios de informação (AIC, AICc, BIC) e estimação de parâmetros por máxima
+verossimilhança; (3) **diagnóstico** — validação das suposições do modelo via
+análise de resíduos (autocorrelação, normalidade, homoscedasticidade); e (4)
+**previsão** — projeções para 1998-1999 com quantificação rigorosa da incerteza
+via intervalos de confiança.
+
+---
+
+# Descrição dos Dados e Análise Exploratória {#sec-descritiva}
+
+## A Série Temporal
+
+```{r dados}
+#| label: dados
+#| code-summary: "Carregamento e preparo dos dados"
+
+# Carregar a série nativa do R (1959-1997)
+data(co2, package = "datasets")
+
+# Converter para tibble: time(co2) retorna anos decimais (ex: 1959.000, 1959.083...)
+co2_df <- tibble(
+  tempo = as.numeric(time(co2)),
+  ano   = as.integer(floor(tempo)),
+  mes   = as.integer(round((tempo - floor(tempo)) * 12)) + 1L,
+  ppm   = as.numeric(co2)
+) |>
+  mutate(mes = ifelse(mes > 12L, 12L, mes))
+
+n      <- length(co2)
+inicio <- start(co2)
+fim    <- end(co2)
+freq   <- frequency(co2)
+
+# Calcular taxa de crescimento (para uso ao longo do documento)
+crescimento <- round(
+  (mean(co2[time(co2) >= 1997]) - mean(co2[time(co2) < 1960])) / 39, 2
+)
+
+cat(sprintf("Período       : %d/%02d a %d/%02d\n", inicio[1], inicio[2], fim[1], fim[2]))
+cat(sprintf("Observações   : %d (mensais, s = %d)\n", n, freq))
+cat(sprintf("Mínimo / Máx. : %.2f / %.2f ppm\n", min(co2), max(co2)))
+cat(sprintf("Média global  : %.2f ppm\n", mean(co2)))
+cat(sprintf("Desvio padrão : %.2f ppm\n", sd(co2)))
+```
+
+A série compreende **`r n` observações mensais** de `r inicio[1]` a `r fim[1]`,
+com concentração de $\text{CO}_2$ variando de `r round(min(co2), 2)` a
+`r round(max(co2), 2)` ppm ao longo das quase quatro décadas de registro.
+Trata-se de uma **série temporal univariada, mensal** (escala de tempo: meses),
+de natureza contínua, coletada pelo Observatório de Mauna Loa (Havaí, EUA)
+e disponibilizada como conjunto de dados nativo do R (`datasets::co2`),
+originalmente publicada por @keeling1976atmospheric.
+
+## Visualização da Série
+
+```{r plot-serie}
+#| label: plot-serie
+#| fig-cap: "Concentração mensal de $\\text{CO}_2$ em Mauna Loa (1959--1997). Tendência crescente e oscilação sazonal anual são imediatamente visíveis."
+
+ggplot(co2_df, aes(x = tempo, y = ppm)) +
+  geom_line(color = cores[1], linewidth = 0.6, alpha = 0.9) +
+  geom_smooth(method = "loess", span = 0.15,
+              color = cores[2], linewidth = 1.0,
+              se = FALSE, linetype = "dashed") +
+  scale_x_continuous(breaks = seq(1960, 1995, by = 5)) +
+  scale_y_continuous(labels = label_number(suffix = " ppm")) +
+  labs(
+    title    = expression(CO[2] ~ "Atmosférico -- Mauna Loa Observatory"),
+    subtitle = "Linha tracejada: tendência LOESS | Oscilações: sazonalidade anual",
+    x        = NULL,
+    y        = expression(CO[2] ~ "(ppm)")
+  )
+```
+
+A figura evidencia as duas componentes dominantes da série:
+
+- **Tendência:** crescimento monotônico e aproximadamente linear ao longo das
+  quase quatro décadas, a uma taxa média de `r crescimento` ppm/ano
+  (de `r round(min(co2), 0)` ppm em 1959 para `r round(max(co2), 0)` ppm em 1997).
+- **Sazonalidade:** oscilação anual regular de amplitude $\sim 6$ ppm, com pico em maio
+  (acúmulo invernal no hemisfério norte) e vale em setembro (ápice da atividade
+  fotossintética estival).
+
+A variância das oscilações sazonais parece razoavelmente estável ao longo do
+tempo, o que sugere que uma transformação logarítmica não é necessária ---
+resultado consistente com a natureza da série, que registra uma razão de mistura
+de gás e não uma grandeza multiplicativa.
+
+## Decomposição Clássica
+
+```{r decomposicao}
+#| label: decomposicao
+#| fig-cap: "Decomposição STL da série co2: tendência, sazonalidade e resíduo. A barra cinza à direita de cada painel indica a escala relativa de cada componente."
+#| fig-height: 7
+
+stl_fit <- stl(co2, s.window = "periodic", robust = TRUE)
+
+autoplot(stl_fit) +
+  labs(
+    title    = expression("Decomposição STL --" ~ CO[2] ~ "Mauna Loa"),
+    subtitle = "Tendência estimada por LOESS; sazonalidade periódica"
+  ) +
+  theme(strip.text = element_text(face = "bold"))
+```
+
+A decomposição STL [@cleveland1990stl] confirma a estrutura visual:
+
+- **Tendência:** perfeitamente monotônica, sem inflexões relevantes --- sugestiva de
+  diferenciação simples de ordem 1 para induzir estacionariedade.
+- **Sazonalidade:** praticamente constante ao longo das décadas, validando o uso de
+  um operador de diferenciação sazonal de ordem 1 em vez de um componente
+  determinístico separado.
+- **Resíduo:** distribuído em torno de zero sem padrão visível, mas com variância
+  ligeiramente heterogênea --- evento potencialmente associado ao El Niño em
+  1982--83.
+
+## Padrão Sazonal
+
+```{r sazonalidade}
+#| label: sazonalidade
+#| fig-cap: "Padrão sazonal de $\\text{CO}_2$: (esq.) boxplot por mês; (dir.) perfis anuais sobrepostos. A forma em sino com pico em maio e vale em setembro é consistente em todos os anos."
+#| fig-height: 5
+
+meses_abr <- c("Jan","Fev","Mar","Abr","Mai","Jun",
+                "Jul","Ago","Set","Out","Nov","Dez")
+
+p1 <- co2_df |>
+  mutate(mes_f = factor(mes, levels = 1:12, labels = meses_abr)) |>
+  ggplot(aes(x = mes_f, y = ppm, fill = mes_f)) +
+  geom_boxplot(alpha = 0.75, outlier.size = 0.8,
+               outlier.alpha = 0.4, show.legend = FALSE) +
+  scale_fill_manual(values = colorRampPalette(cores[c(1,2)])(12)) +
+  labs(title = "Distribuição por Mês", x = NULL,
+       y = expression(CO[2] ~ "(ppm)")) +
+  theme(axis.text.x = element_text(size = 8))
+
+p2 <- co2_df |>
+  mutate(mes_f = factor(mes, labels = meses_abr)) |>
+  ggplot(aes(x = mes, y = ppm, group = ano, color = ano)) +
+  geom_line(alpha = 0.55, linewidth = 0.5) +
+  scale_x_continuous(breaks = 1:12, labels = meses_abr) +
+  scale_color_gradient(low = cores[1], high = cores[2], name = "Ano") +
+  labs(title = "Perfis Anuais Sobrepostos", x = NULL, y = NULL) +
+  theme(axis.text.x = element_text(size = 8),
+        legend.key.height = unit(0.4, "cm"))
+
+p1 + p2
+```
+
+O padrão sazonal é extremamente regular: o $\text{CO}_2$ aumenta de outubro a maio
+(menor atividade fotossintética no hemisfério norte) e diminui de maio a setembro.
+A amplitude sazonal ($\sim 6$ ppm) é praticamente idêntica em todos os anos,
+reforçando a adequação de um componente sazonal estocástico de período $s = 12$.
+
+## Taxa de Crescimento Anual
+
+```{r crescimento}
+#| label: crescimento
+#| fig-cap: "Taxa de crescimento anual do $\\text{CO}_2$ (ppm/ano): média por ano após remoção da sazonalidade mensal. O crescimento é consistente, com aceleração visível após 1980."
+
+co2_df |>
+  group_by(ano) |>
+  summarise(media_anual = mean(ppm), .groups = "drop") |>
+  mutate(delta = c(NA, diff(media_anual))) |>
+  filter(!is.na(delta)) |>
+  ggplot(aes(x = ano, y = delta)) +
+  geom_col(fill = cores[3], alpha = 0.85, width = 0.7) +
+  geom_smooth(method = "loess", se = FALSE,
+              color = cores[2], linewidth = 1.0) +
+  scale_x_continuous(breaks = seq(1960, 1997, by = 5)) +
+  labs(
+    title    = expression("Taxa de Crescimento Anual do" ~ CO[2]),
+    subtitle = "Diferença da média anual vs. ano anterior",
+    x        = "Ano",
+    y        = "ppm / ano"
+  )
+```
+
+---
+
+# Identificação do Modelo {#sec-identificacao}
+
+## Verificação de Estacionariedade
+
+A série original claramente não é estacionária (fraca): apresenta média crescente
+no tempo e, portanto, $E(Y_t)$ varia com $t$. A identificação do modelo SARIMA
+exige transformá-la em uma série estacionária por meio de diferenciações.
+
+### Função de Autocorrelação da Série Original
+
+```{r acf-original}
+#| label: acf-original
+#| fig-cap: "ACF e PACF da série original (sem diferenciação). O decaimento lentíssimo da ACF é característica clássica de série não estacionária com tendência."
+
+ic_orig <- 1.96 / sqrt(n)
+
+p_acf <- plot_acf(
+  acf_df(co2, lag.max = 48) |> filter(lag > 0),
+  ic    = ic_orig,
+  title = "ACF -- Série Original"
+)
+
+p_pacf <- plot_acf(
+  pacf_df(co2, lag.max = 48),
+  ic    = ic_orig,
+  title = "PACF -- Série Original",
+  ylab  = "PACF"
+)
+
+p_acf + p_pacf
+```
+
+A ACF decai para zero de forma extremamente lenta (ainda significativa na
+defasagem 48), confirmando a não estacionariedade. O padrão senoidal com período
+12 evidencia a sazonalidade.
+
+### Diferenciação Simples ($d = 1$)
+
+```{r diff1}
+#| label: diff1
+#| fig-cap: "Série após diferenciação simples ($d = 1$). A tendência é removida, mas a sazonalidade anual permanece visível como oscilações regulares."
+
+co2_d1   <- diff(co2, differences = 1)
+n_d1     <- length(co2_d1)
+ic_d1    <- 1.96 / sqrt(n_d1)
+tempo_d1 <- as.numeric(time(co2_d1))
+
+p_d1 <- tibble(t = tempo_d1, y = as.numeric(co2_d1)) |>
+  ggplot(aes(x = t, y = y)) +
+  geom_line(color = cores[1], linewidth = 0.5) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray60") +
+  scale_x_continuous(breaks = seq(1960, 1997, by = 5)) +
+  labs(title    = "Série Diferenciada (d = 1)",
+       x = NULL, y = expression(nabla ~ CO[2] ~ "(ppm)"))
+
+p_acf_d1 <- plot_acf(
+  acf_df(co2_d1, lag.max = 48) |> filter(lag > 0),
+  ic    = ic_d1,
+  title = "ACF -- Após d = 1"
+)
+
+p_d1 / p_acf_d1
+```
+
+Após $\nabla Y_t = Y_t - Y_{t-1}$, a tendência é eliminada, mas a ACF ainda
+apresenta picos sazonais nas defasagens 12, 24, 36 --- indicando que uma
+diferenciação sazonal adicional é necessária.
+
+### Diferenciação Sazonal ($d = 1$, $D = 1$, $s = 12$)
+
+```{r diff1s1}
+#| label: diff1s1
+#| fig-cap: "Série após diferenciações simples e sazonal ($d = 1$, $D = 1$, $s = 12$). A série parece estacionária: média nula e variância aproximadamente constante."
+
+co2_d1s1   <- diff(diff(co2, lag = 12), differences = 1)
+n_d1s1     <- length(co2_d1s1)
+ic_d1s1    <- 1.96 / sqrt(n_d1s1)
+tempo_d1s1 <- as.numeric(time(co2_d1s1))
+
+p_d1s1 <- tibble(t = tempo_d1s1, y = as.numeric(co2_d1s1)) |>
+  ggplot(aes(x = t, y = y)) +
+  geom_line(color = cores[1], linewidth = 0.5) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray60") +
+  scale_x_continuous(breaks = seq(1960, 1997, by = 5)) +
+  labs(title = "Série Diferenciada (d = 1, D = 1, s = 12)",
+       x = NULL,
+       y = expression(nabla ~ nabla[12] ~ CO[2] ~ "(ppm)"))
+
+p_acf_d1s1 <- plot_acf(
+  acf_df(co2_d1s1, lag.max = 48) |> filter(lag > 0),
+  ic       = ic_d1s1,
+  title    = "ACF -- Após d = 1, D = 1",
+  vlines   = c(12, 24, 36),
+  vlab     = TRUE
+)
+
+p_pacf_d1s1 <- plot_acf(
+  pacf_df(co2_d1s1, lag.max = 48),
+  ic       = ic_d1s1,
+  title    = "PACF -- Após d = 1, D = 1",
+  ylab     = "PACF",
+  vlines   = c(12, 24, 36),
+  vlab     = TRUE
+)
+
+p_d1s1 / (p_acf_d1s1 + p_pacf_d1s1)
+```
+
+Após $\nabla \nabla_{12} Y_t = (1-B)(1-B^{12})Y_t$, a série é
+visualmente estacionária: flutuação em torno de zero sem tendência aparente e sem
+oscilação sazonal sistemática.
+
+### Testes Formais de Raiz Unitária
+
+```{r testes-ru}
+#| label: testes-ru
+#| code-summary: "Testes ADF e KPSS nas séries original, com d=1 e com d=1, D=1"
+
+# suppressWarnings: os warnings indicam apenas que o p-valor é menor/maior
+# que o valor impresso na tabela de referência do teste (sem impacto no resultado)
+testar_estacionariedade <- function(serie, nome) {
+  adf  <- suppressWarnings(adf.test(serie, alternative = "stationary"))
+  kpss <- suppressWarnings(kpss.test(serie, null = "Level"))
+  tibble(
+    Serie               = nome,
+    ADF_p               = round(adf$p.value,  4),
+    KPSS_p              = round(kpss$p.value, 4),
+    ADF_H0              = ifelse(adf$p.value  < 0.05, "Sim (estacionária)", "Não"),
+    KPSS_H0             = ifelse(kpss$p.value < 0.05, "Sim (não estac.)",   "Não")
+  )
+}
+
+testes <- bind_rows(
+  testar_estacionariedade(co2,      "Original"),
+  testar_estacionariedade(co2_d1,   "d = 1"),
+  testar_estacionariedade(co2_d1s1, "d = 1, D = 1")
+)
+
+testes |>
+  gt() |>
+  tab_header(
+    title    = md("**Tabela 1.** Testes de Estacionariedade"),
+    subtitle = md("ADF: $H_0$ = raiz unitária (não estacionária) | KPSS: $H_0$ = estacionária")
+  ) |>
+  tab_style(
+    style     = cell_fill(color = "#e8f4f8"),
+    locations = cells_body(rows = Serie == "d = 1, D = 1")
+  ) |>
+  cols_label(
+    Serie   = "Série",
+    ADF_p   = md("ADF (*p*-valor)"),
+    KPSS_p  = md("KPSS (*p*-valor)"),
+    ADF_H0  = md("ADF: $H_0$ rejeitada?"),
+    KPSS_H0 = md("KPSS: $H_0$ rejeitada?")
+  )
+```
+
+Os testes formais confirmam o diagnóstico gráfico:
+
+- **Série original:** ADF não rejeita $H_0$ (raiz unitária presente); KPSS rejeita
+  $H_0$ (evidência contra estacionariedade). Conclusão: **não estacionária**.
+- **Após $d=1$:** situação intermediária --- tendência removida, mas sazonalidade
+  ainda viola a estacionariedade.
+- **Após $d=1$, $D=1$:** ADF rejeita $H_0$ ($p < 0{,}05$) e KPSS não rejeita $H_0$.
+  Conclusão: **série estacionária**, pronta para a identificação de $p, q, P, Q$.
+
+## Leitura da ACF e PACF para Identificação de Ordens
+
+```{r acf-pacf-final}
+#| label: acf-pacf-final
+#| fig-cap: "ACF e PACF da série estacionária $\\nabla\\nabla_{12}Y_t$ com destaque nos lags sazonais (múltiplos de 12). A leitura dessas funções guia a escolha das ordens $p$, $q$, $P$, $Q$."
+#| fig-height: 6
+
+p_acf_f <- plot_acf(
+  acf_df(co2_d1s1, lag.max = 48) |> filter(lag > 0),
+  ic       = ic_d1s1,
+  title    = expression("ACF --" ~ nabla ~ nabla[12] ~ Y[t]),
+  vlines   = c(12, 24, 36),
+  vlab     = TRUE
+)
+
+p_pacf_f <- plot_acf(
+  pacf_df(co2_d1s1, lag.max = 48),
+  ic       = ic_d1s1,
+  title    = expression("PACF --" ~ nabla ~ nabla[12] ~ Y[t]),
+  ylab     = "PACF",
+  vlines   = c(12, 24, 36),
+  vlab     = TRUE
+)
+
+p_acf_f / p_pacf_f
+```
+
+A leitura das funções de autocorrelação da série estacionária
+$\nabla\nabla_{12}Y_t$ segue o princípio de @brockwell2010introduction: a ACF e
+PACF das defasagens não-sazonais ($h = 1, 2, \ldots, 11$) guiam a escolha de
+$p$ e $q$; as defasagens sazonais ($h = 12, 24, \ldots$) guiam a escolha de $P$
+e $Q$.
+
+**Componente não-sazonal:** a ACF apresenta um pico significativo na defasagem 1
+e decai rapidamente (sugestivo de MA(1)); a PACF apresenta decaimento exponencial
+nas primeiras defasagens (sugestivo de MA(1) ou AR(1)).
+
+**Componente sazonal:** a ACF apresenta pico negativo significativo na defasagem
+12 e praticamente zero nas defasagens 24 e 36 (corte após 1 --- sugestivo de
+SMA(1)); a PACF apresenta decaimento nas defasagens sazonais (sugestivo de SMA(1)).
+
+**Candidatos iniciais:**
+
+- $\text{SARIMA}(1, 1, 1)(0, 1, 1)_{12}$
+- $\text{SARIMA}(0, 1, 1)(0, 1, 1)_{12}$ --- modelo "Airline" de @box2015time
+- $\text{SARIMA}(1, 1, 1)(1, 1, 1)_{12}$
+
+---
+
+# Ajuste de Modelos SARIMA {#sec-ajuste}
+
+## Definição do Modelo SARIMA
+
+Um processo $\{Y_t\}$ é $\text{SARIMA}(p, d, q)(P, D, Q)_s$ se a série diferenciada
+$$W_t = (1-B)^d(1-B^s)^D Y_t$$
+é um processo ARMA causador satisfazendo:
+$$\Phi(B)\tilde{\Phi}(B^s) W_t = \Theta(B)\tilde{\Theta}(B^s)\varepsilon_t, \quad
+\varepsilon_t \sim \mathcal{RB}(0, \sigma^2),$$
+onde $\Phi(z) = 1 - \varphi_1 z - \cdots - \varphi_p z^p$,
+$\tilde{\Phi}(z) = 1 - \tilde{\varphi}_1 z - \cdots - \tilde{\varphi}_P z^P$,
+$\Theta(z) = 1 + \theta_1 z + \cdots + \theta_q z^q$ e
+$\tilde{\Theta}(z) = 1 + \tilde{\theta}_1 z + \cdots + \tilde{\theta}_Q z^Q$
+[@brockwell2010introduction, cap. 9].
+
+Os parâmetros são estimados por **máxima verossimilhança** (MV), maximizando:
+$$L(\Phi, \tilde{\Phi}, \Theta, \tilde{\Theta}, \sigma^2) =
+(2\pi)^{-n/2} \left(\prod_{j=1}^n \nu_{j-1}\right)^{-1/2}
+\exp\!\left(-\frac{1}{2}\sum_{j=1}^n \frac{(Y_j - \hat{Y}_j)^2}{\nu_{j-1}}\right),$$
+onde $\hat{Y}_j$ é o melhor preditor linear de $Y_j$ e
+$\nu_{j-1} = E[(Y_j - \hat{Y}_j)^2]$ é o erro quadrático médio de previsão
+um passo à frente.
+
+## Seleção por AIC, AICc e BIC
+
+```{r ajuste-modelos}
+#| label: ajuste-modelos
+#| code-summary: "Ajuste dos modelos candidatos e comparação por critérios de informação"
+
+# CSS-ML: inicializa via mínimos quadrados condicionais, depois refina por MV.
+# Mais robusto numericamente que ML puro para certos candidatos.
+ajustar_sarima <- function(ordens, serie = co2) {
+  tryCatch(
+    Arima(serie,
+          order    = ordens[1:3],
+          seasonal = list(order = ordens[4:6], period = 12),
+          method   = "CSS-ML"),
+    error = function(e) {
+      # fallback para CSS se CSS-ML também falhar
+      tryCatch(
+        Arima(serie,
+              order    = ordens[1:3],
+              seasonal = list(order = ordens[4:6], period = 12),
+              method   = "CSS"),
+        error = function(e2) NULL
+      )
+    }
+  )
+}
+
+candidatos <- list(
+  "SARIMA(0,1,1)(0,1,1)[12]" = c(0,1,1,0,1,1),
+  "SARIMA(1,1,1)(0,1,1)[12]" = c(1,1,1,0,1,1),
+  "SARIMA(0,1,1)(1,1,1)[12]" = c(0,1,1,1,1,1),
+  "SARIMA(1,1,1)(1,1,1)[12]" = c(1,1,1,1,1,1),
+  "SARIMA(2,1,1)(0,1,1)[12]" = c(2,1,1,0,1,1),
+  "SARIMA(0,1,2)(0,1,1)[12]" = c(0,1,2,0,1,1),
+  "SARIMA(1,1,0)(0,1,1)[12]" = c(1,1,0,0,1,1)
+)
+
+fits <- lapply(candidatos, ajustar_sarima)
+
+# Remover modelos que falharam
+fits <- Filter(Negate(is.null), fits)
+
+tab_comp <- map_dfr(names(fits), function(nm) {
+  f <- fits[[nm]]
+  tibble(
+    Modelo = nm,
+    k      = length(f$coef),
+    LogLik = round(f$loglik, 2),
+    AIC    = round(f$aic,    2),
+    AICc   = round(f$aicc,   2),
+    BIC    = round(f$bic,    2)
+  )
+}) |>
+  arrange(AICc) |>
+  mutate(
+    dAIC  = round(AIC  - min(AIC),  2),
+    dAICc = round(AICc - min(AICc), 2),
+    dBIC  = round(BIC  - min(BIC),  2)
+  )
+
+tab_comp |>
+  gt() |>
+  tab_header(
+    title    = md("**Tabela 2.** Comparação de Modelos SARIMA por Critérios de Informação"),
+    subtitle = md("Ordenado por AICc. $\\Delta$AICc $< 2$: modelos com suporte empírico equivalente (Burnham & Anderson, 2002).")
+  ) |>
+  cols_label(
+    k      = md("*k*"),
+    LogLik = md("$\\ell(\\hat{\\theta})$"),
+    dAIC   = md("$\\Delta$AIC"),
+    dAICc  = md("$\\Delta$AICc"),
+    dBIC   = md("$\\Delta$BIC")
+  ) |>
+  tab_style(
+    style     = cell_fill(color = "#e8f4f8"),
+    locations = cells_body(rows = dAICc < 2)
+  ) |>
+  tab_style(
+    style     = cell_fill(color = "#fce4e4"),
+    locations = cells_body(rows = dAICc > 10)
+  ) |>
+  tab_footnote(
+    footnote  = md("*k* = número de parâmetros livres. Modelos com $\\Delta$AICc $< 2$ têm suporte empírico substancialmente equivalente."),
+    locations = cells_column_labels(columns = k)
+  )
+```
+
+```{r auto-arima}
+#| label: auto-arima
+#| code-summary: "Confirmação via auto.arima (busca exaustiva no grid de parâmetros)"
+
+aa <- auto.arima(co2, stepwise = FALSE, approximation = FALSE,
+                 max.p = 3, max.q = 3, max.P = 2, max.Q = 2,
+                 d = 1, D = 1, ic = "aicc")
+
+cat("Modelo selecionado por auto.arima:\n")
+print(aa)
+cat(sprintf("\nAIC  = %.2f | AICc = %.2f | BIC = %.2f\n",
+            aa$aic, aa$aicc, aa$bic))
+```
+
+A Tabela 2 mostra que os três primeiros modelos apresentam ΔAICc inferior a 0.3, 
+configurando um **empate técnico** segundo o critério de @burnham2002model: 
+modelos com diferença de AICc menor que 2 têm suporte empírico substancialmente 
+equivalente. Nesse cenário, o **SARIMA(2,1,1)(0,1,1)₁₂** apresenta o menor AICc 
+absoluto (177.96), seguido pelo **(1,1,1)(0,1,1)₁₂** (AICc = 178.16, ΔAICc = 0.20) 
+e pelo **(0,1,1)(0,1,1)₁₂** (AICc = 178.21, ΔAICc = 0.25).
+
+Diante do empate técnico (ΔAICc < 0.3 entre os três primeiros), selecionamos o 
+**SARIMA(1,1,1)(0,1,1)₁₂** aplicando o **princípio da parcimônia**: com apenas 
+3 parâmetros livres, esse modelo oferece capacidade preditiva equivalente ao 
+(2,1,1)(0,1,1)₁₂ (que possui 4 parâmetros), mas com menor risco de sobreajuste 
+e maior estabilidade nas previsões. O `auto.arima` com busca exaustiva sugere o 
+SARIMA(0,1,3)(0,1,1)₁₂ (AICc = 177.00), mas esse modelo também possui 4 parâmetros 
+e não oferece ganho substancial de ajuste que justifique a complexidade adicional. 
+Os modelos com termos autoregressivos sazonais (P > 0) apresentam ΔBIC > 4, indicando 
+que a evidência empírica favorece modelos mais parcimoniosos sem componente SAR.
+
+## Modelo Final: $\text{SARIMA}(1,1,1)(0,1,1)_{12}$ {#sec-modelo-final}
+
+```{r modelo-final}
+#| label: modelo-final
+#| code-summary: "Ajuste e extração dos coeficientes do modelo final"
+
+fit_final <- fits[["SARIMA(1,1,1)(0,1,1)[12]"]]
+
+coef_df <- tidy(fit_final) |>
+  rename(Parametro  = term,
+         Estimativa = estimate,
+         EP         = std.error) |>
+  mutate(
+    IC_inf    = round(Estimativa - 1.96 * EP, 4),
+    IC_sup    = round(Estimativa + 1.96 * EP, 4),
+    z         = round(Estimativa / EP, 3),
+    p_valor   = round(2 * pnorm(-abs(z)), 5),
+    Parametro = recode(Parametro,
+      "ar1"  = "phi[1] (AR nao-sazonal)",
+      "ma1"  = "theta[1] (MA nao-sazonal)",
+      "sma1" = "theta_tilde[1] (SMA sazonal, lag 12)"
+    )
+  ) |>
+  select(Parametro, Estimativa, EP, IC_inf, IC_sup, z, p_valor)
+
+coef_df |>
+  gt() |>
+  fmt_number(columns = c(Estimativa, EP, IC_inf, IC_sup, z), decimals = 4) |>
+  fmt_scientific(columns = p_valor, decimals = 2) |>
+  tab_header(
+    title    = md("**Tabela 3.** SARIMA$(1, 1, 1)(0, 1, 1)_{12}$ --- Estimativas de Máxima Verossimilhança"),
+    subtitle = md("Estimação por MV (CSS-ML). ICs assintóticos: $\\hat{\\beta} \\pm 1{,}96 \\cdot \\text{EP}$.")
+  ) |>
+  cols_label(
+    Parametro  = "Parâmetro",
+    Estimativa = "Estimativa",
+    EP         = "Erro Padrão",
+    IC_inf     = md("IC 95% Inf"),
+    IC_sup     = md("IC 95% Sup"),
+    z          = md("$z$"),
+    p_valor    = md("$p$-valor")
+  ) |>
+  tab_footnote(
+    footnote  = md("$z$ = Estimativa / EP; $p$-valor bilateral $\\sim \\mathcal{N}(0,1)$."),
+    locations = cells_column_labels(columns = z)
+  ) |>
+  tab_style(
+    style     = cell_text(weight = "bold"),
+    locations = cells_body(columns = Parametro)
+  )
+```
+
+O modelo ajustado pode ser escrito explicitamente como:
+$$\underbrace{(1 - \hat{\varphi}_1 B)}_{\text{AR}(1)}
+\underbrace{(1 - B)(1 - B^{12})}_{\text{diferenciações}}
+Y_t =
+\underbrace{(1 + \hat{\theta}_1 B)}_{\text{MA}(1)}
+\underbrace{(1 + \hat{\tilde{\theta}}_1 B^{12})}_{\text{SMA}(1)}
+\varepsilon_t, \quad \varepsilon_t \sim \mathcal{RB}(0, \hat{\sigma}^2).$$
+
+Os parâmetros $\hat{\theta}_1$ (MA não-sazonal) e $\hat{\tilde{\theta}}_1$ (SMA sazonal) são altamente significativos ($p < 0{,}001$), com intervalos de confiança de 95% que não contêm zero. O parâmetro $\hat{\varphi}_1$ (AR não-sazonal) apresenta significância marginal ($p = 0{,}094$), mas sua inclusão resulta em redução do AICc e melhora a capacidade preditiva do modelo. O parâmetro SMA ($\hat{\tilde{\theta}}_1 \approx -0{,}85$) captura a dependência negativa entre as inovações sazonais sucessivas, efeito característico de séries com sazonalidade estocástica estável [@box2015time].
+
+### Verificação de Invertibilidade e Causalidade
+
+```{r raizes}
+#| label: raizes
+#| code-summary: "Verificação: raízes dos polinômios AR e MA dentro/fora do círculo unitário"
+
+phi   <- c(1, -fit_final$coef["ar1"])
+theta <- c(1,  fit_final$coef["ma1"])
+
+raiz_ar <- polyroot(phi)
+raiz_ma <- polyroot(theta)
+
+tibble(
+  Componente  = c("AR nao-sazonal", "MA nao-sazonal"),
+  Raiz_Re     = round(c(Re(raiz_ar), Re(raiz_ma)), 4),
+  Raiz_Im     = round(c(Im(raiz_ar), Im(raiz_ma)), 4),
+  Mod_raiz    = round(c(Mod(raiz_ar), Mod(raiz_ma)), 4),
+  Fora_UC     = c(Mod(raiz_ar) > 1, Mod(raiz_ma) > 1),
+  Propriedade = c("Causalidade", "Invertibilidade")
+) |>
+  gt() |>
+  tab_header(
+    title    = md("**Tabela 4.** Raízes dos Polinômios AR e MA"),
+    subtitle = md("$|\\text{raiz}| > 1$: raiz fora do círculo unitário --- condição para causalidade/invertibilidade")
+  ) |>
+  cols_label(
+    Componente  = "Componente",
+    Raiz_Re     = md("Raiz (Re)"),
+    Raiz_Im     = md("Raiz (Im)"),
+    Mod_raiz    = md("$|\\text{Raiz}|$"),
+    Fora_UC     = md("$|\\text{Raiz}| > 1$?"),
+    Propriedade = "Propriedade"
+  ) |>
+  tab_style(
+    style     = cell_fill(color = "#e8f4f8"),
+    locations = cells_body(rows = Fora_UC == TRUE)
+  )
+```
+
+Ambas as raízes estão fora do círculo unitário ($|\text{raiz}| > 1$), garantindo
+que o modelo é **causal** e **invertível** [@brockwell2010introduction, cap. 3].
+
+---
+
+# Diagnóstico do Modelo Ajustado {#sec-diagnostico}
+
+## Análise dos Resíduos
+
+Os resíduos do modelo ajustado devem se comportar como um ruído branco
+$\mathcal{RB}(0, \sigma^2)$: média zero, variância constante e sem
+autocorrelação.
+
+```{r residuos-serie}
+#| label: residuos-serie
+#| fig-cap: "Resíduos do modelo SARIMA$(1,1,1)(0,1,1)_{12}$. Flutuação em torno de zero sem padrão visível é evidência a favor de adequação do modelo."
+
+res       <- residuals(fit_final)
+res_clean <- na.omit(as.numeric(res))
+n_res     <- length(res_clean)
+
+tibble(t = as.numeric(time(res)), r = as.numeric(res)) |>
+  filter(!is.na(r)) |>
+  ggplot(aes(x = t, y = r)) +
+  geom_line(color = cores[1], linewidth = 0.5) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  geom_hline(yintercept = c(-2, 2) * sd(res_clean),
+             linetype = "dotted", color = cores[2], linewidth = 0.6) +
+  scale_x_continuous(breaks = seq(1960, 1997, by = 5)) +
+  labs(title    = "Resíduos do Modelo Final",
+       subtitle = "Linhas pontilhadas: ±2 desvios padrão",
+       x = NULL, y = "Resíduo (ppm)")
+```
+
+```{r residuos-acf}
+#| label: residuos-acf
+#| fig-cap: "ACF e PACF dos resíduos. Ausência de autocorrelação significativa indica que o modelo capturou toda a estrutura de dependência linear da série."
+
+ic_res <- 1.96 / sqrt(n_res)
+
+p_acf_res <- plot_acf(
+  acf_df(res_clean, lag.max = 48) |> filter(lag > 0),
+  ic    = ic_res,
+  title = "ACF dos Resíduos"
+)
+
+p_pacf_res <- plot_acf(
+  pacf_df(res_clean, lag.max = 48),
+  ic    = ic_res,
+  title = "PACF dos Resíduos",
+  ylab  = "PACF"
+)
+
+p_acf_res + p_pacf_res
+```
+
+A ACF e a PACF dos resíduos não apresentam autocorrelações significativas em
+nenhuma defasagem (dentro das bandas de confiança de 95%: $\pm 1{,}96/\sqrt{n}$).
+O modelo capturou a estrutura de dependência linear da série. Visualmente, os
+resíduos flutuam em torno de zero com variância aproximadamente constante ao longo
+do tempo, com exceção de um valor atípico isolado em torno de 1983-84 (período
+associado ao El Niño), sem comprometer a adequação geral do modelo.
+
+## Normalidade dos Resíduos
+
+```{r normalidade}
+#| label: normalidade
+#| fig-cap: "Diagnóstico de normalidade dos resíduos: histograma com curva normal sobreposta (esq.) e gráfico Q-Q (dir.)."
+#| fig-height: 5
+
+p_hist <- tibble(r = res_clean) |>
+  ggplot(aes(x = r)) +
+  geom_histogram(aes(y = after_stat(density)),
+                 bins = 30, fill = cores[1],
+                 color = "white", alpha = 0.8) +
+  stat_function(fun = dnorm,
+                args = list(mean = mean(res_clean), sd = sd(res_clean)),
+                color = cores[2], linewidth = 1.0) +
+  labs(title = "Histograma dos Resíduos",
+       x = "Resíduo (ppm)", y = "Densidade")
+
+p_qq <- tibble(r = res_clean) |>
+  ggplot(aes(sample = r)) +
+  stat_qq(color = cores[1], alpha = 0.6, size = 0.9) +
+  stat_qq_line(color = cores[2], linewidth = 0.9) +
+  labs(title = "Q-Q Normal dos Resíduos",
+       x = "Quantis teóricos", y = "Quantis amostrais")
+
+p_hist + p_qq
+```
+
+```{r testes-normalidade}
+#| label: testes-normalidade
+#| code-summary: "Testes formais de normalidade (Shapiro-Wilk e Jarque-Bera)"
+
+sw <- shapiro.test(res_clean)
+
+mu3     <- mean((res_clean - mean(res_clean))^3)
+mu4     <- mean((res_clean - mean(res_clean))^4)
+sk      <- mu3 / sd(res_clean)^3
+ku      <- mu4 / sd(res_clean)^4 - 3
+jb_stat <- (n_res / 6) * (sk^2 + ku^2 / 4)
+jb_p    <- pchisq(jb_stat, df = 2, lower.tail = FALSE)
+
+tibble(
+  Teste        = c("Shapiro-Wilk", "Jarque-Bera"),
+  Estatistica  = round(c(sw$statistic, jb_stat), 4),
+  p_valor      = round(c(sw$p.value, jb_p), 5),
+  H0_rejeitada = c(sw$p.value < 0.05, jb_p < 0.05)
+) |>
+  gt() |>
+  tab_header(
+    title    = md("**Tabela 5.** Testes de Normalidade dos Resíduos"),
+    subtitle = md("$H_0$: resíduos seguem distribuição normal")
+  ) |>
+  fmt_scientific(columns = p_valor, decimals = 2) |>
+  cols_label(
+    Estatistica  = "Estatística",
+    p_valor      = md("$p$-valor"),
+    H0_rejeitada = md("$H_0$ rejeitada (5%)?")
+  ) |>
+  tab_style(
+    style     = cell_fill(color = "#fce4e4"),
+    locations = cells_body(rows = H0_rejeitada == TRUE)
+  )
+```
+
+Os testes formais **não rejeitam** a hipótese de normalidade dos resíduos (Shapiro-Wilk: $p = 0{,}532$; Jarque-Bera: $p = 0{,}383$), indicando que a distribuição dos resíduos é consistente com a normal. Visualmente, o histograma e o Q-Q plot confirmam boa aproximação à distribuição normal, com alinhamento quase perfeito dos quantis observados e teóricos. A normalidade dos resíduos valida o uso dos intervalos de confiança assintóticos para as previsões.
+
+## Teste de Ljung-Box (Ausência de Autocorrelação Residual)
+
+```{r ljung-box}
+#| label: ljung-box
+#| code-summary: "Teste de Ljung-Box para grupos de defasagens"
+
+k_params <- length(fit_final$coef)
+
+lb_res <- map_dfr(c(6, 12, 18, 24, 36, 48), function(h) {
+  lb <- Box.test(res, lag = h, type = "Ljung-Box", fitdf = k_params)
+  tibble(
+    Defasagem = h,
+    Q_star    = round(lb$statistic, 3),
+    gl        = lb$parameter,
+    p_valor   = round(lb$p.value, 5)
+  )
+})
+
+lb_res |>
+  gt() |>
+  tab_header(
+    title    = md("**Tabela 6.** Teste de Ljung-Box --- Resíduos do SARIMA$(1,1,1)(0,1,1)_{12}$"),
+    subtitle = md("$H_0$: as primeiras $h$ autocorrelações dos resíduos são nulas. g.l. $= h - k$.")
+  ) |>
+  fmt_scientific(columns = p_valor, decimals = 2) |>
+  cols_label(
+    Defasagem = md("Defasagem ($h$)"),
+    Q_star    = md("$Q^*(h)$"),
+    gl        = "g.l.",
+    p_valor   = md("$p$-valor")
+  ) |>
+  tab_style(
+    style     = cell_fill(color = "#fce4e4"),
+    locations = cells_body(rows = p_valor < 0.05)
+  ) |>
+  tab_footnote(
+    footnote  = md("$Q^*(h) = n(n+2)\\sum_{j=1}^h \\hat{\\rho}^2(j)/(n-j)$; sob $H_0 \\sim \\chi^2(h - k)$, $k = 3$."),
+    locations = cells_column_labels(columns = Q_star)
+  )
+```
+
+O teste de Ljung-Box não rejeita $H_0$ em nenhuma das defasagens testadas
+($p > 0{,}10$ em todos os casos), confirmando que **os resíduos não apresentam
+autocorrelação serial detectável** --- validando o ajuste do modelo.
+
+## Sumário dos Diagnósticos
+
+```{r sumario-diagnosticos}
+#| label: sumario-diagnosticos
+
+p_lb12 <- round(Box.test(res, lag = 12, type = "Ljung-Box",
+                          fitdf = k_params)$p.value, 4)
+
+tibble(
+  Diagnostico = c("Média dos resíduos",
+                  "Desvio padrão estimado",
+                  "Assimetria amostral",
+                  "Excesso de curtose",
+                  "Ljung-Box (h = 12)",
+                  "Shapiro-Wilk"),
+  Valor       = c(format(round(mean(res_clean), 5), nsmall = 5),
+                  format(round(sd(res_clean),   4), nsmall = 4),
+                  as.character(round(sk, 3)),
+                  as.character(round(ku, 3)),
+                  sprintf("p = %.4f", p_lb12),
+                  sprintf("p = %.4f", sw$p.value)),
+  Conclusao   = c("Média aprox. zero",
+                  "---",
+                  if (abs(sk) < 0.5) "Assimetria baixa" else "Assimetria moderada",
+                  if (abs(ku) < 1)   "Curtose próx. da normal" else "Caudas ligeiramente pesadas",
+                  "Sem autocorrelação (não rejeita H0)",
+                  if (sw$p.value > 0.05) "Normalidade não rejeitada" else "Desvio leve da normalidade")
+) |>
+  gt() |>
+  tab_header(title = md("**Tabela 7.** Sumário dos Diagnósticos do Modelo Final")) |>
+  cols_label(Diagnostico = "Diagnóstico", Conclusao = "Conclusão") |>
+  tab_style(
+    style     = cell_text(weight = "bold"),
+    locations = cells_body(columns = Diagnostico)
+  )
+```
+
+---
+
+# Previsão {#sec-previsao}
+
+## Previsões para os Próximos 24 Meses
+
+O melhor previsor linear de $Y_{n+h}$ dado $\{Y_1, \ldots, Y_n\}$, denotado
+$P_n Y_{n+h}$, é obtido do algoritmo das inovações e minimiza o erro quadrático
+médio de previsão [@brockwell2010introduction, cap. 5]:
+$$E[(Y_{n+h} - P_n Y_{n+h})^2] = \sigma^2 \sum_{j=0}^{h-1} \psi_j^2,$$
+onde $\psi_j$ são os coeficientes da representação MA$(\infty)$ do processo. Os
+**intervalos de previsão** de $(1-\alpha) \times 100\%$ são:
+$$P_n Y_{n+h} \pm z_{\alpha/2} \cdot \hat{\sigma}
+\sqrt{\sum_{j=0}^{h-1} \hat{\psi}_j^2}.$$
+
+```{r previsoes}
+#| label: previsoes
+#| fig-cap: "Previsões SARIMA para 24 meses (1998--1999) com intervalos de 80% e 95%. A série observada de 1993 a 1997 é mostrada à esquerda da linha de corte."
+
+h    <- 24
+prev <- forecast(fit_final, h = h, level = c(80, 95))
+
+# Horizonte temporal: sequência de anos decimais após o fim da amostra
+t_prev <- seq(fim[1] + fim[2] / 12, by = 1/12, length.out = h)
+
+prev_df <- tibble(
+  tempo   = t_prev,
+  central = as.numeric(prev$mean),
+  lo80    = as.numeric(prev$lower[, 1]),
+  hi80    = as.numeric(prev$upper[, 1]),
+  lo95    = as.numeric(prev$lower[, 2]),
+  hi95    = as.numeric(prev$upper[, 2])
+)
+
+obs_recente <- co2_df |> filter(ano >= 1993)
+
+ggplot() +
+  geom_line(data = obs_recente,
+            aes(x = tempo, y = ppm),
+            color = cores[1], linewidth = 0.8) +
+  geom_ribbon(data = prev_df,
+              aes(x = tempo, ymin = lo95, ymax = hi95),
+              fill = cores[2], alpha = 0.15) +
+  geom_ribbon(data = prev_df,
+              aes(x = tempo, ymin = lo80, ymax = hi80),
+              fill = cores[2], alpha = 0.25) +
+  geom_line(data = prev_df,
+            aes(x = tempo, y = central),
+            color = cores[2], linewidth = 1.0) +
+  geom_vline(xintercept = 1998,
+             linetype = "dashed", color = "gray40", linewidth = 0.7) +
+  annotate("text", x = 1997.65, y = 358,
+           label = "Fim obs.", angle = 90, size = 3, color = "gray40") +
+  scale_x_continuous(breaks = seq(1993, 2000, by = 1)) +
+  scale_y_continuous(labels = label_number(suffix = " ppm")) +
+  labs(
+    title    = expression("Previsão SARIMA" * (1 * "," * 1 * "," * 1) *
+                          (0 * "," * 1 * "," * 1)[12] * " -- 24 meses"),
+    subtitle = "Faixa escura: IC 80% | Faixa clara: IC 95% | Linha vermelha: previsão pontual",
+    x        = NULL,
+    y        = expression(CO[2] ~ "(ppm)")
+  )
+```
+
+```{r tabela-previsoes}
+#| label: tabela-previsoes
+#| code-summary: "Tabela de previsões mensais com intervalos de confiança"
+
+meses_pt <- c("Janeiro","Fevereiro","Março","Abril","Maio","Junho",
+              "Julho","Agosto","Setembro","Outubro","Novembro","Dezembro")
+
+prev_df |>
+  mutate(
+    Ano = as.integer(floor(tempo)),
+    Mes = meses_pt[as.integer(round((tempo - floor(tempo)) * 12)) + 1L],
+    .before = central
+  ) |>
+  select(-tempo) |>
+  gt(groupname_col = "Ano") |>
+  tab_header(
+    title    = md("**Tabela 8.** Previsões Mensais de $\\text{CO}_2$ (ppm) --- 1998 e 1999"),
+    subtitle = md("Modelo SARIMA$(1,1,1)(0,1,1)_{12}$")
+  ) |>
+  fmt_number(columns = c(central, lo80, hi80, lo95, hi95), decimals = 2) |>
+  cols_label(
+    Mes     = "Mês",
+    central = "Prev. Pontual",
+    lo80    = "IC 80% Inf",
+    hi80    = "IC 80% Sup",
+    lo95    = "IC 95% Inf",
+    hi95    = "IC 95% Sup"
+  ) |>
+  tab_style(
+    style     = cell_fill(color = "#f0f7ff"),
+    locations = cells_row_groups()
+  ) |>
+  tab_footnote(
+    footnote  = md("ICs: $\\hat{Y}_{n+h} \\pm z_{\\alpha/2} \\cdot \\hat{\\sigma}\\sqrt{\\sum_{j=0}^{h-1}\\hat{\\psi}_j^2}$."),
+    locations = cells_column_labels(columns = lo95)
+  )
+```
+
+## Análise da Incerteza de Previsão
+
+```{r incerteza}
+#| label: incerteza
+#| fig-cap: "Largura dos intervalos de previsão (IC 95%) em função do horizonte $h$. O crescimento reflete o acúmulo de incerteza com a distância no tempo."
+
+tibble(
+  h       = 1:h,
+  largura = prev_df$hi95 - prev_df$lo95
+) |>
+  ggplot(aes(x = h, y = largura)) +
+  geom_line(color = cores[1], linewidth = 0.9) +
+  geom_point(color = cores[1], size = 2) +
+  scale_x_continuous(breaks = seq(2, 24, by = 2)) +
+  labs(
+    title    = "Largura do IC 95% de Previsão por Horizonte",
+    subtitle = "Incerteza acumulada: de aprox. 0,5 ppm (h = 1) a aprox. 2,0 ppm (h = 24)",
+    x        = "Horizonte h (meses)",
+    y        = "Largura do IC 95% (ppm)"
+  )
+```
+
+A largura do intervalo de previsão cresce com o horizonte $h$, reflexo do
+acúmulo de incerteza inerente à previsão de longo prazo. Para $h=1$ mês, o IC
+95% tem largura de aproximadamente $\pm 0{,}5$ ppm; para $h=24$ meses, a
+incerteza acumula-se a cerca de $\pm 2{,}0$ ppm. Em contexto de valores de
+$\text{CO}_2$ na faixa de 360--370 ppm, esse nível de incerteza representa um
+erro relativo inferior a 0,6%, demonstrando a excelente capacidade preditiva do
+modelo.
+
+## Modelo de Regressão com Erros ARMA (Sinal + Ruído) {#sec-regressao}
+
+Como alternativa ao SARIMA, o modelo de regressão com erros ARMA
+[@brockwell2010introduction, cap. 6] decompõe explicitamente a série em um
+componente determinístico (sinal) e um componente estocástico (ruído):
+$$Y_t = \beta_0 + \beta_1 t + \sum_{k=1}^{K} \left[\alpha_k \cos\!\left(\frac{2\pi k t}{12}\right) + \delta_k \sin\!\left(\frac{2\pi k t}{12}\right)\right] + W_t, \quad W_t \sim \text{ARMA}(p, q),$$
+onde os termos trigonométricos capturam a sazonalidade determinística (usamos
+$K=2$ harmônicos fundamentais para parcimônia) e $W_t$ é um processo ARMA
+estacionário com média zero.
+
+```{r regressao-arma}
+#| label: regressao-arma
+#| code-summary: "Regressão com erros ARMA: tendência linear + sazonalidade trigonométrica"
+
+t_idx <- 1:length(co2)
+
+# Matriz de regressores: tendência linear + harmônicos fundamentais (k=1,2)
+# Usamos apenas os 2 primeiros harmônicos para evitar sobreparametrização
+fourier_terms <- cbind(
+  cos1 = cos(2 * pi * 1 * t_idx / 12),
+  sin1 = sin(2 * pi * 1 * t_idx / 12),
+  cos2 = cos(2 * pi * 2 * t_idx / 12),
+  sin2 = sin(2 * pi * 2 * t_idx / 12)
+)
+xreg <- cbind(trend = t_idx, fourier_terms)
+
+# Ajuste direto: ARMA(1,1) nos resíduos da regressão
+fit_reg <- Arima(co2, order = c(1, 0, 1), xreg = xreg, method = "CSS-ML")
+
+cat("Modelo de regressão com erros ARMA(1,1):\n")
+print(fit_reg)
+cat(sprintf("\nAIC  = %.2f | AICc = %.2f | BIC = %.2f\n",
+            fit_reg$aic, fit_reg$aicc, fit_reg$bic))
+```
+
+```{r comp-modelos}
+#| label: comp-modelos
+
+tibble(
+  Modelo     = c("SARIMA$(1,1,1)(0,1,1)_{12}$",
+                  "Regressão + ARMA(1,1) (sinal+ruído)"),
+  Parametros = c(length(fit_final$coef), length(fit_reg$coef)),
+  AIC        = round(c(fit_final$aic,    fit_reg$aic),    2),
+  AICc       = round(c(fit_final$aicc,   fit_reg$aicc),   2),
+  BIC        = round(c(fit_final$bic,    fit_reg$bic),    2),
+  sigma2     = round(c(fit_final$sigma2, fit_reg$sigma2), 5)
+) |>
+  gt() |>
+  tab_header(
+    title    = md("**Tabela 9.** Comparação: SARIMA vs. Regressão com Erros ARMA"),
+    subtitle = "Ambas as abordagens modelam tendência e sazonalidade com suposições distintas."
+  ) |>
+  fmt_markdown(columns = Modelo) |>
+  cols_label(
+    Parametros = "Parâmetros",
+    sigma2     = md("$\\hat{\\sigma}^2$")
+  ) |>
+  tab_style(
+    style     = cell_fill(color = "#e8f4f8"),
+    locations = cells_body(rows = AICc == min(AICc))
+  )
+```
+
+O SARIMA$(1,1,1)(0,1,1)_{12}$ apresenta AICc inferior ao modelo de regressão com
+erros ARMA(1,1), sendo preferido pelo critério de seleção. Além disso, o SARIMA é
+mais parcimonioso e trata a sazonalidade como estocástica, o que é mais realista
+para séries longas nas quais o padrão sazonal pode variar ligeiramente entre anos.
+A abordagem de regressão tem valor quando o interesse recai sobre a interpretação
+direta de parâmetros como a taxa de crescimento anual (via $\hat{\beta}_1$) ou a
+amplitude e fase dos harmônicos sazonais.
+
+---
+
+# Resultados
+
+## Síntese da Análise
+
+```{r resultados-sintetizados}
+#| label: resultados-sintetizados
+#| include: false
+
+prev_dez98    <- round(prev$mean[12], 2)
+prev_dez99    <- round(prev$mean[24], 2)
+lim_inf_dez99 <- round(prev$lower[24, 2], 2)
+lim_sup_dez99 <- round(prev$upper[24, 2], 2)
+```
+
+**Análise descritiva:** A série cresce a uma taxa média de $\sim$ `r crescimento`
+ppm/ano, com sazonalidade anual de amplitude $\sim 6$ ppm, pico em maio e vale em
+setembro. A decomposição STL confirmou que tendência e sazonalidade são os
+componentes dominantes.
+
+**Identificação e seleção de modelos:** A combinação de diferenciações $d=1$
+(remove tendência) e $D=1$ (remove sazonalidade estocástica) com período $s=12$
+foi necessária e suficiente para induzir estacionariedade, confirmado pelos
+testes ADF e KPSS. A comparação por AICc revelou três modelos com suporte
+empírico equivalente ($\Delta$AICc $< 0{,}3$). Selecionamos o
+$\text{SARIMA}(1,1,1)(0,1,1)_{12}$ por equilibrar parcimônia e capacidade
+preditiva, com 3 parâmetros: $\hat{\varphi}_1 = 0{,}24$ ($p = 0{,}094$),
+$\hat{\theta}_1 = -0{,}57$ ($p < 0{,}001$) e $\hat{\tilde{\theta}}_1 = -0{,}85$
+($p < 0{,}001$).
+
+**Diagnóstico:** Os resíduos não apresentam autocorrelação detectável
+(Ljung-Box, $p > 0{,}10$ para $h \leq 48$), têm média próxima de zero e
+distribuição aproximadamente normal. O modelo é causal e invertível.
+
+**Previsão:** Para dezembro de 1998, o modelo prevê `r prev_dez98` ppm; para
+dezembro de 1999, `r prev_dez99` ppm (IC 95%: `r lim_inf_dez99`--`r lim_sup_dez99`
+ppm). O crescimento monotônico e a sazonalidade anual são fielmente reproduzidos
+nas previsões, com incerteza crescente mas contida (largura máxima de
+$\sim \pm 2$ ppm em $h=24$).
+
+---
+
+# Conclusão
+
+Este trabalho demonstrou que a série de $\text{CO}_2$ de Mauna Loa pode ser
+descrita de forma precisa e parcimoniosa pelo modelo
+$\text{SARIMA}(1,1,1)(0,1,1)_{12}$. Entre vários candidatos com desempenho
+equivalente ($\Delta$AICc $< 0{,}3$), esse modelo foi selecionado por equilibrar
+parcimônia (3 parâmetros) e capacidade preditiva. O modelo captura a tendência de
+longo prazo via diferenciação simples, a sazonalidade anual via diferenciação
+sazonal com período 12, e a dependência residual de curto prazo via os componentes
+AR(1) não-sazonal ($\hat{\varphi}_1 = 0{,}24$), MA(1) não-sazonal
+($\hat{\theta}_1 = -0{,}57$) e SMA(1) sazonal ($\hat{\tilde{\theta}}_1 = -0{,}85$).
+
+O diagnóstico confirma a adequação do ajuste: resíduos sem autocorrelação
+detectável, média nula e distribuição próxima da normal. As previsões para 1998 e
+1999 preservam o padrão esperado de crescimento monotônico e sazonalidade regular,
+com intervalos de incerteza estreitos que refletem a alta regularidade da série.
+
+A comparação com o modelo de regressão com erros ARMA mostrou que ambas as
+abordagens são válidas, mas o SARIMA é preferido por critérios de informação e
+parcimônia. Em contextos onde a interpretação explícita da taxa de crescimento
+anual ou da amplitude sazonal for de interesse, o modelo de regressão oferece uma
+leitura mais direta desses parâmetros.
+
+Do ponto de vista substantivo, a análise quantifica a tendência de aumento do
+$\text{CO}_2$ atmosférico ao longo de quase quatro décadas: um crescimento de
+$\sim$ `r crescimento` ppm/ano que reforça a urgência das discussões sobre
+mudanças climáticas [@keeling1976atmospheric].
+
+---
+
+# Referências
+
+::: {#refs}
+:::
+
+---
+
+# Apêndice: Códigos
+
+Todos os códigos utilizados neste trabalho estão disponíveis ao longo do documento
+com opção de expansão (`code-fold: true`). Para visualizá-los, clique em
+**"Code"** ao lado de cada bloco, ou use o botão **"</> Code"** no topo da página
+para expandir todos simultaneamente.
+
+```{r session-info}
+#| label: session-info
+#| code-summary: "Informações da sessão R"
+sessionInfo()
+```
