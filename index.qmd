@@ -1,32 +1,33 @@
 ---
-title: "$\\text{CO}_2$ Atmosférico em Mauna Loa"
+title: "CO$_2$ Atmosférico em Mauna Loa"
 subtitle: "Trabalho 1 --- Análise de Séries Temporais"
-author:
-  - "Arthur Motta"
-  - "Catarine Martins"
-date: "today"
+author: "Arthur Pontes Motta"
+date: today
 lang: pt
+bibliography: references.bib
+csl: https://raw.githubusercontent.com/citation-style-language/styles/master/associacao-brasileira-de-normas-tecnicas.csl
 format:
   html:
     toc: true
     toc-depth: 3
-    toc-location: left
     toc-title: "Sumário"
-    code-fold: true
-    code-tools: true
+    number-sections: false
     theme: flatly
-    highlight-style: github
-    fig-width: 9
-    fig-height: 5.5
-    number-sections: true
+    code-fold: show
+    code-summary: "Ocultar código"
+    code-tools:
+      source: false
+      toggle: true
+      caption: "Mostrar/ocultar todos os códigos"
+    fig-align: center
     embed-resources: true
 execute:
+  echo: true
   warning: false
   message: false
-  echo: true
-bibliography: references.bib
-crossref:
-  sec-prefix: "Seção"
+knitr:
+  opts_chunk:
+    fig.path: "figures/"
 ---
 
 ```{r setup}
