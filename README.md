@@ -3,6 +3,7 @@
 **Trabalho 1 — Análise de Séries Temporais**
 > Disciplina: Análise de Séries Temporais — DME/IM-UFRJ  
 > Autores: Arthur Motta & Catarine Martins
+> Professor: João Batista de Morais Pereira
 
 ---
 
