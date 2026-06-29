@@ -16,6 +16,8 @@ O relatório está disponível em formato interativo:
 
 - **[Versão interativa](https://arthurpmotta02.github.io/co2-mauna-loa-sarima/)** — gráficos com código R expansível, tabelas completas e resultados inline (GitHub Pages)
 
+> A análise desta série foi estendida no **[Trabalho 2 — Modelos Lineares Dinâmicos](https://arthurpmotta02.github.io/co2-mauna-loa-dlm/)**, que aplica filtragem de Kalman, suavização backward e fatores de desconto à mesma série usando a metodologia MLD.
+
 ---
 
 ## Sobre o trabalho
